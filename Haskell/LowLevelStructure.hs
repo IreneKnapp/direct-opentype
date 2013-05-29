@@ -1,6 +1,12 @@
 {-# LANGUAGE TemplateHaskell #-}
 module LowLevelStructure
   (FieldType(..),
+   F16Dot16,
+   F2Dot14,
+   LongDateTime,
+   Tag,
+   stringTag,
+   integerTag,
    lowLevelStructure)
   where
 
@@ -46,21 +52,42 @@ instance Show F2Dot14 where
 data LongDateTime = LongDateTimeData Word64
   deriving (Eq, Ord)
 instance Show LongDateTime where
-  show (LongDateTimeData word) = "LongDateTime " ++ show word
+  show (LongDateTimeData word) = "{LongDateTime} " ++ show word
 
 
 data Tag = TagData Word8 Word8 Word8 Word8
   deriving (Eq, Ord)
 instance Show Tag where
   show (TagData byte1 byte2 byte3 byte4) =
-    "Tag 0x" ++ concatMap showByte [byte1, byte2, byte3, byte4]
-    where showByte byte =
+    if all isShowable bytes
+      then "{Tag} '" ++ map (chr . fromIntegral) bytes ++ "'"
+      else "{Tag} 0x" ++ concatMap showByte [byte1, byte2, byte3, byte4]
+    where bytes = [byte1, byte2, byte3, byte4]
+          isShowable byte = (byte >= 32) && (byte < 127)
+          showByte byte =
             (showNibble $ shiftR byte 4 .&. 0x0F)
             ++ (showNibble $ shiftR byte 0 .&. 0x0F)
           showNibble nibble =
             if nibble < 10
               then [chr (ord '0' + (fromIntegral nibble - 0))]
               else [chr (ord 'a' + (fromIntegral nibble - 10))]
+
+
+stringTag :: String -> Tag
+stringTag (a : b : c : d : []) =
+  TagData (fromIntegral $ ord a)
+          (fromIntegral $ ord b)
+          (fromIntegral $ ord c)
+          (fromIntegral $ ord d)
+stringTag _ = TagData 0x00 0x00 0x00 0x00
+
+
+integerTag :: Word32 -> Tag
+integerTag word =
+  TagData (fromIntegral $ shiftR word 24 .&. 0xFF)
+          (fromIntegral $ shiftR word 16 .&. 0xFF)
+          (fromIntegral $ shiftR word 8 .&. 0xFF)
+          (fromIntegral $ shiftR word 0 .&. 0xFF)
 
 
 lowLevelStructure :: String -> [(String, FieldType)] -> Q [Dec]
@@ -294,7 +321,7 @@ lowLevelStructure structureName fieldSpecifications = do
                                    fieldDefinitions))]]
       instanceDefinition =
         InstanceD [] (AppT (AppT (ConT ''Serializable)
-                                 (ConT $ mkName "()"))
+                                 (VarT $ mkName "context"))
                            (ConT dataName))
           [FunD 'serialize [Clause [VarP parameterName] serializeBody []],
            FunD 'deserialize [Clause [] deserializeBody []]]

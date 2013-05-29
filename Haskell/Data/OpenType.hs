@@ -1,4 +1,5 @@
-{-# LANGUAGE TemplateHaskell, MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell, MultiParamTypeClasses, DeriveDataTypeable,
+             FlexibleInstances #-}
 module Data.OpenType
   (Font,
    loadFontFromFile,
@@ -8,6 +9,8 @@ module Data.OpenType
 import qualified Data.ByteString as BS
 
 import BinaryFiles
+import Data.Typeable
+import Data.Word
 
 import LowLevelStructure
 
@@ -23,6 +26,13 @@ lowLevelStructure "OffsetTable"
    ("RangeShift", UShortFieldType)]
 
 
+lowLevelStructure "TableRecord"
+  [("Tag", TagFieldType),
+   ("Checksum", ULongFieldType),
+   ("Offset", ULongFieldType),
+   ("Length", ULongFieldType)]
+
+
 loadFontFromFile :: FilePath -> IO Font
 loadFontFromFile filePath = do
   fontData <- BS.readFile filePath
@@ -32,13 +42,35 @@ loadFontFromFile filePath = do
 debugFont :: Font -> IO ()
 debugFont font = do
   let FontData fontData = font
-  case fromByteString fontData of
+  case runDeserializationFromByteString deserializeHeader fontData of
     Left _ -> putStrLn $ "Can't load."
-    Right offsetTable -> do
-      putStrLn $ "Magic " ++ (show $ offsetTableMagic offsetTable)
-      putStrLn $ "NTables " ++ (show $ offsetTableNTables offsetTable)
-      putStrLn $ "SearchRange " ++ (show $ offsetTableSearchRange offsetTable)
-      putStrLn $ "EntrySelector "
-                 ++ (show $ offsetTableEntrySelector offsetTable)
-      putStrLn $ "RangeShift " ++ (show $ offsetTableRangeShift offsetTable)
+    Right (isCFF, tables) -> do
+      putStrLn $ "Is CFF: " ++ (show isCFF)
+      mapM_ (\(tag, offset, length) -> do
+               putStrLn $ (show tag) ++ " "
+                          ++ (show offset) ++ " "
+                          ++ (show length))
+            tables
+
+
+data Failure
+  = Failure
+  deriving (Show, Typeable)
+instance SerializationFailure Failure
+
+
+deserializeHeader :: Deserialization (Bool, [(Tag, Word32, Word32)])
+deserializeHeader = withTag "Font header" $ do
+  offsetTable <- deserialize
+  isCFF <- case offsetTableMagic offsetTable of
+             magic | magic == integerTag 0x00010000 -> return False
+                   | magic == stringTag "OTTO" -> return True
+                   | otherwise -> throw Failure
+  tables <- mapM (\_ -> do
+                     tableRecord <- deserialize
+                     return (tableRecordTag tableRecord,
+                             tableRecordOffset tableRecord,
+                             tableRecordLength tableRecord))
+                 [0 .. offsetTableNTables offsetTable - 1]
+  return (isCFF, tables)
 
