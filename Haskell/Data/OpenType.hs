@@ -7,15 +7,54 @@ module Data.OpenType
   where
 
 import qualified Data.ByteString as BS
+import qualified Data.Map as Map
 
 import BinaryFiles
+import Control.Monad
 import Data.Typeable
 import Data.Word
+import System.Exit
 
 import LowLevelStructure
 
 
-data Font = FontData BS.ByteString
+data Font =
+  FontData {
+      fontCharacterMap :: Map.Map FontEncoding (Map.Map Word32 Word32)
+    }
+
+
+data FontMagic
+  = PostScriptFontMagic
+  | TrueTypeFontMagic
+  deriving (Eq, Ord)
+
+
+data FontEncoding = FontEncoding Word16 Word16
+  deriving (Eq, Ord, Show)
+
+
+class HasFontMagic context where
+  contextFontMagic :: context -> FontMagic
+class HasTableMap context where
+  contextTableMap :: context -> Map.Map Tag (Word32, Word32)
+
+
+data FontHeaderContext
+  = FontHeaderContext {
+        fontHeaderContextFontMagic :: FontMagic,
+        fontHeaderContextTableMap :: Map.Map Tag (Word32, Word32)
+      }
+instance HasFontMagic FontHeaderContext where
+  contextFontMagic = fontHeaderContextFontMagic
+instance HasTableMap FontHeaderContext where
+  contextTableMap = fontHeaderContextTableMap
+
+
+data Failure
+  = Failure
+  deriving (Show, Typeable)
+instance SerializationFailure Failure
 
 
 lowLevelStructure "OffsetTable"
@@ -35,42 +74,68 @@ lowLevelStructure "TableRecord"
 
 loadFontFromFile :: FilePath -> IO Font
 loadFontFromFile filePath = do
-  fontData <- BS.readFile filePath
-  return $ FontData fontData
+  result <- runDeserializationFromFile deserializeFont filePath
+  case result of
+    Left _ -> do
+      putStrLn $ "Unable to load font: " ++ filePath
+      exitFailure
+    Right font -> return font
 
 
 debugFont :: Font -> IO ()
 debugFont font = do
-  let FontData fontData = font
-  case runDeserializationFromByteString deserializeHeader fontData of
-    Left _ -> putStrLn $ "Can't load."
-    Right (isCFF, tables) -> do
-      putStrLn $ "Is CFF: " ++ (show isCFF)
-      mapM_ (\(tag, offset, length) -> do
-               putStrLn $ (show tag) ++ " "
-                          ++ (show offset) ++ " "
-                          ++ (show length))
-            tables
+  putStrLn $ show $ fontCharacterMap font
 
 
-data Failure
-  = Failure
-  deriving (Show, Typeable)
-instance SerializationFailure Failure
+deserializeFont :: Deserialization Font
+deserializeFont = do
+  fontHeaderContext <- deserializeHeader
+  withContext fontHeaderContext $ do
+    characterMap <- deserializeTable (stringTag "cmap") deserializeCharacterMap
+    return $ FontData {
+                 fontCharacterMap = characterMap
+               }
 
 
-deserializeHeader :: Deserialization (Bool, [(Tag, Word32, Word32)])
-deserializeHeader = withTag "Font header" $ do
+deserializeHeader :: Deserialization FontHeaderContext
+deserializeHeader = withTag "font header" $ do
+  seek OffsetFromStart 0
   offsetTable <- deserialize
-  isCFF <- case offsetTableMagic offsetTable of
-             magic | magic == integerTag 0x00010000 -> return False
-                   | magic == stringTag "OTTO" -> return True
-                   | otherwise -> throw Failure
+  fontMagic <-
+    case offsetTableMagic offsetTable of
+      magic | magic == integerTag 0x00010000 -> return TrueTypeFontMagic
+            | magic == stringTag "OTTO" -> return PostScriptFontMagic
+            | otherwise -> throw Failure
   tables <- mapM (\_ -> do
-                     tableRecord <- deserialize
-                     return (tableRecordTag tableRecord,
-                             tableRecordOffset tableRecord,
-                             tableRecordLength tableRecord))
+                    tableRecord <- deserialize
+                    return (tableRecordTag tableRecord,
+                            (tableRecordOffset tableRecord,
+                             tableRecordLength tableRecord)))
                  [0 .. offsetTableNTables offsetTable - 1]
-  return (isCFF, tables)
+            >>= return . Map.fromList
+  return $ FontHeaderContext {
+               fontHeaderContextFontMagic = fontMagic,
+               fontHeaderContextTableMap = tables
+             }
+
+
+deserializeTable
+  :: (HasTableMap context)
+  => Tag
+  -> ContextualDeserialization context a
+  -> ContextualDeserialization context a
+deserializeTable tag action = do
+  context <- getContext
+  case Map.lookup tag (contextTableMap context) of
+    Nothing -> throw Failure
+    Just (offset, length) -> do
+      seek OffsetFromStart (fromIntegral offset)
+      withWindow OffsetFromCurrent 0 (fromIntegral length) action
+
+
+
+deserializeCharacterMap
+  :: Deserialization (Map.Map FontEncoding (Map.Map Word32 Word32))
+deserializeCharacterMap = withTag "character map" $ do
+  return Map.empty
 
