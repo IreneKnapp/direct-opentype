@@ -65,11 +65,28 @@ lowLevelStructure "OffsetTable"
    ("RangeShift", UShortFieldType)]
 
 
-lowLevelStructure "TableRecord"
+lowLevelStructure "OffsetTableRecord"
   [("Tag", TagFieldType),
    ("Checksum", ULongFieldType),
    ("Offset", ULongFieldType),
    ("Length", ULongFieldType)]
+
+
+lowLevelStructure "CharacterMapTable"
+  [("Version", UShortFieldType),
+   ("NTables", UShortFieldType)]
+
+
+lowLevelStructure "CharacterMapEncodingRecord"
+  [("PlatformID", UShortFieldType),
+   ("EncodingID", UShortFieldType),
+   ("Offset", ULongFieldType)]
+
+
+lowLevelStructure "CharacterMapSubtableHeader"
+  [("Format", UShortFieldType),
+   ("Length", UShortFieldType),
+   ("Language", UShortFieldType)]
 
 
 loadFontFromFile :: FilePath -> IO Font
@@ -107,10 +124,10 @@ deserializeHeader = withTag "font header" $ do
             | magic == stringTag "OTTO" -> return PostScriptFontMagic
             | otherwise -> throw Failure
   tables <- mapM (\_ -> do
-                    tableRecord <- deserialize
-                    return (tableRecordTag tableRecord,
-                            (tableRecordOffset tableRecord,
-                             tableRecordLength tableRecord)))
+                    record <- deserialize
+                    return (offsetTableRecordTag record,
+                            (offsetTableRecordOffset record,
+                             offsetTableRecordLength record)))
                  [0 .. offsetTableNTables offsetTable - 1]
             >>= return . Map.fromList
   return $ FontHeaderContext {
@@ -133,9 +150,28 @@ deserializeTable tag action = do
       withWindow OffsetFromCurrent 0 (fromIntegral length) action
 
 
-
 deserializeCharacterMap
   :: Deserialization (Map.Map FontEncoding (Map.Map Word32 Word32))
 deserializeCharacterMap = withTag "character map" $ do
-  return Map.empty
+  seek OffsetFromStart 0
+  characterMapTable <- deserialize
+  let loopEncodings i soFar = do
+        if i == characterMapTableNTables characterMapTable
+          then return soFar
+          else do
+            encodingRecord <- deserialize
+            offset <- tell
+            seek OffsetFromStart
+                 $ fromIntegral
+                     $ characterMapEncodingRecordOffset encodingRecord
+            encodingMap <- return $ Map.empty
+            seek OffsetFromStart offset
+            let platformID =
+                  characterMapEncodingRecordPlatformID encodingRecord
+                encodingID =
+                  characterMapEncodingRecordEncodingID encodingRecord
+                soFar' = Map.insert (FontEncoding platformID encodingID)
+                                    encodingMap soFar
+            loopEncodings (i + 1) soFar'
+  loopEncodings 0 Map.empty
 
